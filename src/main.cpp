@@ -26,11 +26,10 @@
 #define NOMINMAX
 #endif
 
-// netioapi.h needs the Winsock address declarations on MinGW and works with
-// the same include order on the Microsoft Windows SDK.
+// iphlpapi.h includes netioapi.h in user mode; provide its Winsock types first.
 #include <winsock2.h>
+#include <ws2ipdef.h>
 #include <windows.h>
-#include <netioapi.h>
 #include <iphlpapi.h>
 #include <shellapi.h>
 #include <strsafe.h>
