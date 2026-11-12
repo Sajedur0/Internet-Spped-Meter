@@ -2,8 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 //
 // A deliberately small Win32 tray application. It samples Windows interface
-// byte counters once per second and draws a click-through meter above the
-// notification area rather than injecting anything into Explorer.
+// byte counters once per second and draws a click-through meter directly on
+// the taskbar (inside the taskbar strip, left of the tray/clock) rather than
+// injecting anything into Explorer.
 
 #ifndef UNICODE
 #define UNICODE
@@ -225,6 +226,88 @@ HMONITOR FindPrimaryMonitor() {
     return primaryMonitor;
 }
 
+// The primary taskbar window. The meter is positioned directly on top of this
+// window's area (inside the taskbar strip) instead of floating above it, so it
+// looks like part of the taskbar without injecting anything into Explorer.
+HWND FindTaskbarWindow() {
+    return FindWindowW(L"Shell_TrayWnd", nullptr);
+}
+
+bool TryGetWindowRect(HWND window, RECT* rect) {
+    return window != nullptr && rect != nullptr &&
+           GetWindowRect(window, rect) != 0;
+}
+
+// True when the taskbar is actually on screen. Explorer hides the window when
+// the taskbar is turned off, and auto-hide slides it almost entirely off the
+// monitor edge, which leaves only a few pixels visible.
+bool IsTaskbarOnScreen(HWND taskbar, const RECT& taskbarRect) {
+    if (!IsWindowVisible(taskbar)) {
+        return false;
+    }
+
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    const HMONITOR monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTONEAREST);
+    if (monitor == nullptr || !GetMonitorInfoW(monitor, &monitorInfo)) {
+        return true;
+    }
+
+    RECT visible{};
+    if (!IntersectRect(&visible, &taskbarRect, &monitorInfo.rcMonitor)) {
+        return false;
+    }
+
+    const long long taskbarArea =
+        static_cast<long long>(taskbarRect.right - taskbarRect.left) *
+        static_cast<long long>(taskbarRect.bottom - taskbarRect.top);
+    const long long visibleArea =
+        static_cast<long long>(visible.right - visible.left) *
+        static_cast<long long>(visible.bottom - visible.top);
+    return visibleArea * 2 >= taskbarArea;
+}
+
+// A fullscreen app (game, video player) covers the taskbar, so the meter has
+// no business being on top of it. Only the monitor holding the taskbar counts,
+// so a fullscreen app on a second display does not hide the meter.
+bool IsFullScreenAppActiveOn(HMONITOR monitor) {
+    const HWND foreground = GetForegroundWindow();
+    if (foreground == nullptr || !IsWindowVisible(foreground) ||
+        foreground == GetShellWindow()) {
+        return false;
+    }
+
+    if (MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) != monitor) {
+        return false;
+    }
+
+    RECT windowRect{};
+    if (!GetWindowRect(foreground, &windowRect)) {
+        return false;
+    }
+
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo)) {
+        return false;
+    }
+
+    return windowRect.left <= monitorInfo.rcMonitor.left &&
+           windowRect.top <= monitorInfo.rcMonitor.top &&
+           windowRect.right >= monitorInfo.rcMonitor.right &&
+           windowRect.bottom >= monitorInfo.rcMonitor.bottom;
+}
+
+bool IsLightTheme() {
+    DWORD value = 0;
+    DWORD valueSize = sizeof(value);
+    const LSTATUS status = RegGetValueW(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &valueSize);
+    return status == ERROR_SUCCESS && value != 0;
+}
+
 std::wstring GetExecutablePath() {
     std::vector<wchar_t> buffer(MAX_PATH);
 
@@ -329,8 +412,8 @@ void SaveOverlayVisibility(bool visible) {
 }
 
 void ConfigureDpiAwareness() {
-    // Per-monitor V2 gives the small overlay crisp text when it is used on a
-    // secondary display with a different scale. Fall back cleanly on older
+    // Per-monitor V2 gives the small taskbar meter crisp text when it is used
+    // on a secondary display with a different scale. Fall back cleanly on older
     // Windows versions where this entry point does not exist.
     using SetProcessDpiAwarenessContextFunction =
         BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
@@ -416,14 +499,17 @@ private:
         }
 
         window_ = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED |
+                WS_EX_TRANSPARENT,
             kWindowClassName, kApplicationName, WS_POPUP,
             0, 0, 0, 0, nullptr, nullptr, instance_, nullptr);
         if (window_ == nullptr) {
             return false;
         }
 
-        SetLayeredWindowAttributes(window_, 0, 238, LWA_ALPHA);
+        // Fully opaque keeps the meter crisp over the taskbar (and avoids
+        // redraw ghosting when the shell repaints behind it).
+        SetLayeredWindowAttributes(window_, 0, 255, LWA_ALPHA);
         dpi_ = GetWindowDpi(window_);
         CreateFonts();
 
@@ -434,7 +520,7 @@ private:
         // The first sample establishes the baseline, so the first real rate
         // appears on the following one-second tick.
         UpdateSpeed();
-        PositionOverlay();
+        PositionMeter();
         if (overlayVisible_) {
             ShowWindow(window_, SW_SHOWNOACTIVATE);
             UpdateWindow(window_);
@@ -449,9 +535,13 @@ private:
                           WPARAM wParam,
                           LPARAM lParam) {
         if (message == taskbarCreatedMessage_) {
-            // Explorer has restarted and removed the notification icon.
+            // Explorer has restarted and removed the notification icon and
+            // the taskbar window. Re-add the icon and re-place the meter on
+            // the new taskbar.
             trayIconAdded_ = false;
             AddTrayIcon();
+            hasLastMeterPosition_ = false;
+            PositionMeter();
             return 0;
         }
 
@@ -470,8 +560,9 @@ private:
                 return 1;
 
             case WM_NCHITTEST:
-                // The meter is informational. Clicks go to the app below it
-                // rather than taking focus away from the user's work.
+                // The meter is informational. Clicks go to the taskbar (or the
+                // window below) rather than taking focus away from the user's
+                // work. WS_EX_TRANSPARENT covers the rest of the hit test.
                 return HTTRANSPARENT;
 
             case WM_MOUSEACTIVATE:
@@ -480,13 +571,16 @@ private:
             case WM_DPICHANGED:
                 dpi_ = HIWORD(wParam);
                 CreateFonts();
-                PositionOverlay();
+                hasLastMeterPosition_ = false;
+                PositionMeter();
                 InvalidateRect(window_, nullptr, TRUE);
                 return 0;
 
             case WM_DISPLAYCHANGE:
             case WM_SETTINGCHANGE:
-                PositionOverlay();
+                hasLastMeterPosition_ = false;
+                PositionMeter();
+                InvalidateRect(window_, nullptr, FALSE);
                 return 0;
 
             case WM_POWERBROADCAST:
@@ -563,6 +657,7 @@ private:
                     window_,
                     L"Internet Speed Meter\n\n"
                     L"Native Win32 network speed display.\n"
+                    L"The meter sits on the taskbar, left of the tray icons.\n"
                     L"Left-click the tray icon to show or hide the meter.\n"
                     L"Right-click it for startup and exit options.",
                     kApplicationName, MB_OK | MB_ICONINFORMATION);
@@ -635,7 +730,7 @@ private:
         }
 
         AppendMenuW(menu, MF_STRING | (overlayVisible_ ? MF_CHECKED : MF_UNCHECKED),
-                    kMenuToggleOverlay, L"Show speed meter");
+                    kMenuToggleOverlay, L"Show speed on taskbar");
         AppendMenuW(menu, MF_STRING | (startupEnabled_ ? MF_CHECKED : MF_UNCHECKED),
                     kMenuToggleStartup, L"Start with Windows");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -658,7 +753,7 @@ private:
         SaveOverlayVisibility(overlayVisible_);
 
         if (overlayVisible_) {
-            PositionOverlay();
+            PositionMeter();
             ShowWindow(window_, SW_SHOWNOACTIVATE);
             UpdateWindow(window_);
         } else {
@@ -682,15 +777,129 @@ private:
             uploadText_ = FormatSpeed(reading.uploadBytesPerSecond);
         }
 
+        // Follow the taskbar if it moved/resized and hide with it when it
+        // auto-hides. This runs once per second on the existing timer.
+        PositionMeter();
         InvalidateRect(window_, nullptr, FALSE);
         UpdateTrayTooltip();
     }
 
-    void PositionOverlay() {
+    void PositionMeter() {
         if (window_ == nullptr) {
             return;
         }
 
+        const int width = ScaleForDpi(150, dpi_);
+        const int gap = ScaleForDpi(6, dpi_);
+        const int defaultHeight = ScaleForDpi(36, dpi_);
+
+        const HWND taskbar = FindTaskbarWindow();
+        RECT taskbarRect{};
+        if (taskbar != nullptr && TryGetWindowRect(taskbar, &taskbarRect)) {
+            // Hide the meter with the taskbar. With auto-hide the taskbar is
+            // not "invisible": it slides mostly off the screen edge, so also
+            // treat a mostly off-screen taskbar as hidden. The next timer tick
+            // brings the meter back as soon as the taskbar reappears.
+            const HMONITOR taskbarMonitor =
+                MonitorFromWindow(taskbar, MONITOR_DEFAULTTONEAREST);
+
+            if (!IsTaskbarOnScreen(taskbar, taskbarRect) ||
+                IsFullScreenAppActiveOn(taskbarMonitor)) {
+                if (IsWindowVisible(window_)) {
+                    ShowWindow(window_, SW_HIDE);
+                }
+                return;
+            }
+
+            const int taskbarWidth = taskbarRect.right - taskbarRect.left;
+            const int taskbarHeight = taskbarRect.bottom - taskbarRect.top;
+            const bool horizontal = taskbarWidth > taskbarHeight;
+
+            if (horizontal) {
+                if (taskbarHeight < ScaleForDpi(20, dpi_)) {
+                    if (IsWindowVisible(window_)) {
+                        ShowWindow(window_, SW_HIDE);
+                    }
+                    return;
+                }
+
+                // Fit the meter inside the taskbar strip, including the
+                // "use small taskbar buttons" setting.
+                int height = defaultHeight;
+                const int maxHeight = taskbarHeight - ScaleForDpi(2, dpi_);
+                if (height > maxHeight) {
+                    height = maxHeight;
+                }
+
+                const int y = taskbarRect.top + (taskbarHeight - height) / 2;
+
+                // Default: leave room for the clock and show-desktop button
+                // at the far right of the taskbar.
+                int x = taskbarRect.right - ScaleForDpi(110, dpi_) - width - gap;
+
+                // Prefer the empty space just left of the tray area so the
+                // meter never covers tray icons or the clock.
+                const HWND tray =
+                    FindWindowExW(taskbar, nullptr, L"TrayNotifyWnd", nullptr);
+                RECT trayRect{};
+                if (tray != nullptr &&
+                    TryGetWindowRect(tray, &trayRect) &&
+                    trayRect.right > trayRect.left) {
+                    x = trayRect.left - width - gap;
+                } else {
+                    HWND clock =
+                        FindWindowExW(taskbar, nullptr, L"TrayClockWClass", nullptr);
+                    if (clock == nullptr && tray != nullptr) {
+                        clock = FindWindowExW(tray, nullptr, L"TrayClockWClass",
+                                              nullptr);
+                    }
+                    RECT clockRect{};
+                    if (clock != nullptr &&
+                        TryGetWindowRect(clock, &clockRect)) {
+                        x = clockRect.left - width - gap;
+                    }
+                }
+
+                x = std::max(static_cast<int>(taskbarRect.left) + gap, x);
+
+                PlaceMeter(x, y, width, height);
+                if (overlayVisible_ && !IsWindowVisible(window_)) {
+                    ShowWindow(window_, SW_SHOWNOACTIVATE);
+                    UpdateWindow(window_);
+                }
+                return;
+            }
+            // A vertical (left/right) taskbar is too narrow to hold the
+            // meter, so hug its inner edge instead of dropping the meter into
+            // a desktop corner.
+            MONITORINFO monitorInfo{};
+            monitorInfo.cbSize = sizeof(monitorInfo);
+            if (taskbarMonitor != nullptr &&
+                GetMonitorInfoW(taskbarMonitor, &monitorInfo)) {
+                const int availableWidth = static_cast<int>(
+                    monitorInfo.rcWork.right - monitorInfo.rcWork.left);
+                int meterWidth = width;
+                if (meterWidth > availableWidth - (gap * 2)) {
+                    meterWidth = availableWidth - (gap * 2);
+                }
+
+                const int y = taskbarRect.top + (taskbarHeight - defaultHeight) / 2;
+                const int x =
+                    (taskbarRect.left <= monitorInfo.rcMonitor.left)
+                        ? taskbarRect.right + gap
+                        : taskbarRect.left - meterWidth - gap;
+
+                PlaceMeter(x, y, meterWidth, defaultHeight);
+                if (overlayVisible_ && !IsWindowVisible(window_)) {
+                    ShowWindow(window_, SW_SHOWNOACTIVATE);
+                    UpdateWindow(window_);
+                }
+                return;
+            }
+        }
+
+        // Fallback while Explorer is not ready and there is no taskbar to sit
+        // on yet: use the work-area corner until the next timer tick.
         HMONITOR monitor = FindPrimaryMonitor();
         if (monitor == nullptr) {
             monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTOPRIMARY);
@@ -702,9 +911,7 @@ private:
             return;
         }
 
-        const int width = ScaleForDpi(178, dpi_);
-        const int height = ScaleForDpi(56, dpi_);
-        const int gap = ScaleForDpi(8, dpi_);
+        const int height = defaultHeight;
         const RECT& workArea = monitorInfo.rcWork;
         const RECT& fullArea = monitorInfo.rcMonitor;
         const int workLeft = static_cast<int>(workArea.left);
@@ -717,9 +924,6 @@ private:
         int x = workRight - width - gap;
         int y = workBottom - height - gap;
 
-        // On the normal bottom taskbar this positions the overlay immediately
-        // above the notification area. For a taskbar on another edge, keep it
-        // at the nearest visible right/bottom corner of the work area.
         if (workBottom == fullBottom && workTop > fullTop) {
             y = workTop + gap;
         }
@@ -727,13 +931,36 @@ private:
         x = std::max(workLeft + gap, x);
         y = std::max(workTop + gap, y);
 
+        PlaceMeter(x, y, width, height);
+        if (overlayVisible_ && !IsWindowVisible(window_)) {
+            ShowWindow(window_, SW_SHOWNOACTIVATE);
+            UpdateWindow(window_);
+        }
+    }
+
+    void PlaceMeter(int x, int y, int width, int height) {
+        const bool sizeChanged = !hasLastMeterPosition_ ||
+                                 lastMeterWidth_ != width ||
+                                 lastMeterHeight_ != height;
+
+        lastMeterWidth_ = width;
+        lastMeterHeight_ = height;
+        hasLastMeterPosition_ = true;
+
+        // Re-assert the position on every tick, not just when it changes: the
+        // taskbar is a topmost window too and can end up above the meter after
+        // user interaction. Moving it back to the top of the topmost band is
+        // enough to keep the meter visible on the taskbar.
         SetWindowPos(window_, HWND_TOPMOST, x, y, width, height,
                      SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-        ApplyRoundedRegion(width, height);
+
+        if (sizeChanged) {
+            ApplyRoundedRegion(width, height);
+        }
     }
 
     void ApplyRoundedRegion(int width, int height) {
-        const int corner = std::max(ScaleForDpi(10, dpi_), 2);
+        const int corner = std::max(ScaleForDpi(6, dpi_), 2);
         HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1,
                                          corner, corner);
         if (region == nullptr) {
@@ -750,7 +977,7 @@ private:
         DeleteFonts();
 
         LOGFONTW font{};
-        font.lfHeight = -ScaleForDpi(11, dpi_);
+        font.lfHeight = -ScaleForDpi(9, dpi_);
         font.lfWeight = FW_SEMIBOLD;
         font.lfQuality = CLEARTYPE_QUALITY;
         StringCchCopyW(font.lfFaceName, _countof(font.lfFaceName), L"Segoe UI");
@@ -770,10 +997,19 @@ private:
 
         RECT client{};
         GetClientRect(window_, &client);
-        const int corner = std::max(ScaleForDpi(10, dpi_), 2);
+        const int corner = std::max(ScaleForDpi(6, dpi_), 2);
 
-        HBRUSH background = CreateSolidBrush(RGB(20, 25, 34));
-        HPEN border = CreatePen(PS_SOLID, 1, RGB(60, 76, 99));
+        // Match the taskbar light/dark theme so the meter stays readable on
+        // both. The registry value is re-read on every paint, so a theme
+        // change applies on the next one-second tick.
+        const bool light = IsLightTheme();
+        const COLORREF backgroundColor = light ? RGB(245, 245, 245) : RGB(20, 25, 34);
+        const COLORREF borderColor = light ? RGB(190, 190, 190) : RGB(60, 76, 99);
+        const COLORREF downloadColor = light ? RGB(0, 90, 180) : RGB(94, 211, 255);
+        const COLORREF uploadColor = light ? RGB(0, 130, 60) : RGB(120, 232, 163);
+
+        HBRUSH background = CreateSolidBrush(backgroundColor);
+        HPEN border = CreatePen(PS_SOLID, 1, borderColor);
         HGDIOBJ oldBrush = SelectObject(deviceContext, background);
         HGDIOBJ oldPen = SelectObject(deviceContext, border);
         RoundRect(deviceContext, client.left, client.top,
@@ -785,22 +1021,21 @@ private:
 
         SetBkMode(deviceContext, TRANSPARENT);
         HGDIOBJ oldFont = SelectObject(deviceContext, textFont_);
-        const int left = ScaleForDpi(11, dpi_);
-        const int right = client.right - ScaleForDpi(8, dpi_);
-        const int lineHeight = ScaleForDpi(22, dpi_);
-        const int firstLineTop = ScaleForDpi(5, dpi_);
+        const int left = ScaleForDpi(8, dpi_);
+        const int right = client.right - ScaleForDpi(6, dpi_);
+        // Split the client area in half so the two rates fit any taskbar size.
+        const int lineHeight = (client.bottom - client.top) / 2;
 
         std::wstring downloadLine = L"\x2193  " + downloadText_;
         std::wstring uploadLine = L"\x2191  " + uploadText_;
 
-        RECT downloadRect{left, firstLineTop, right, firstLineTop + lineHeight};
-        SetTextColor(deviceContext, RGB(94, 211, 255));
+        RECT downloadRect{left, client.top, right, client.top + lineHeight};
+        SetTextColor(deviceContext, downloadColor);
         DrawTextW(deviceContext, downloadLine.c_str(), -1, &downloadRect,
                   DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
-        RECT uploadRect{left, firstLineTop + lineHeight, right,
-                        firstLineTop + (lineHeight * 2)};
-        SetTextColor(deviceContext, RGB(120, 232, 163));
+        RECT uploadRect{left, client.top + lineHeight, right, client.bottom};
+        SetTextColor(deviceContext, uploadColor);
         DrawTextW(deviceContext, uploadLine.c_str(), -1, &uploadRect,
                   DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
@@ -818,6 +1053,9 @@ private:
     bool trayIconAdded_ = false;
     bool overlayVisible_ = true;
     bool startupEnabled_ = false;
+    bool hasLastMeterPosition_ = false;
+    int lastMeterWidth_ = 0;
+    int lastMeterHeight_ = 0;
     SpeedSampler sampler_{};
     std::wstring downloadText_ = L"0 B/s";
     std::wstring uploadText_ = L"0 B/s";
