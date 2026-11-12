@@ -1,0 +1,31 @@
+name: Build Windows application
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build x64 executable
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: InternetSpeedMeter-windows-x64
+          path: build/Release/InternetSpeedMeter.exe
+          if-no-files-found: error
