@@ -38,6 +38,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,13 @@
 namespace {
 
 constexpr wchar_t kApplicationName[] = L"Internet Speed Meter";
+// Windows' own icon font: E896 is the Download glyph and E898 the Upload one,
+// the same arrows Explorer and Settings use.
+constexpr wchar_t kIconFontFace[] = L"Segoe MDL2 Assets";
+constexpr wchar_t kDownloadIconGlyph[] = L"\xE896";
+constexpr wchar_t kUploadIconGlyph[] = L"\xE898";
+constexpr wchar_t kDownloadFallbackGlyph[] = L"\x2193";
+constexpr wchar_t kUploadFallbackGlyph[] = L"\x2191";
 constexpr wchar_t kWindowClassName[] = L"InternetSpeedMeter.OverlayWindow";
 constexpr wchar_t kSingleInstanceMutex[] = L"Local\\InternetSpeedMeter.SingleInstance";
 constexpr wchar_t kSettingsRegistryKey[] = L"Software\\InternetSpeedMeter";
@@ -296,6 +304,48 @@ bool IsFullScreenAppActiveOn(HMONITOR monitor) {
            windowRect.top <= monitorInfo.rcMonitor.top &&
            windowRect.right >= monitorInfo.rcMonitor.right &&
            windowRect.bottom >= monitorInfo.rcMonitor.bottom;
+}
+
+// Right edge of the part of the taskbar that is already in use (Start,
+// search, app buttons, language widget...). The meter is parked after it, so
+// the automatic gap is measured against real free space instead of a guess.
+int FindTaskbarOccupiedRightEdge(HWND taskbar, const RECT& taskbarRect,
+                                 int trayLeft) {
+    int occupiedRight = static_cast<int>(taskbarRect.left);
+
+    for (HWND child = GetWindow(taskbar, GW_CHILD); child != nullptr;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        if (!IsWindowVisible(child)) {
+            continue;
+        }
+
+        wchar_t className[64]{};
+        if (GetClassNameW(child, className, _countof(className)) == 0) {
+            continue;
+        }
+
+        // The tray (with its clock) and the show-desktop button live to the
+        // right of the meter and must not count as occupied space.
+        if (std::wcscmp(className, L"TrayNotifyWnd") == 0 ||
+            std::wcscmp(className, L"TrayShowDesktopButtonWClass") == 0 ||
+            std::wcscmp(className, L"TrayClockWClass") == 0) {
+            continue;
+        }
+
+        RECT childRect{};
+        // Skip containers that run into (or across) the tray area: they say
+        // nothing about where the free space starts.
+        if (!TryGetWindowRect(child, &childRect) ||
+            childRect.right <= childRect.left ||
+            childRect.left >= trayLeft ||
+            childRect.right > trayLeft) {
+            continue;
+        }
+
+        occupiedRight = std::max(occupiedRight, static_cast<int>(childRect.right));
+    }
+
+    return occupiedRight;
 }
 
 bool IsLightTheme() {
@@ -792,7 +842,8 @@ private:
             return;
         }
 
-        const int width = ScaleForDpi(150, dpi_);
+        // Content-sized window: no empty space on the right of the readings.
+        const int width = std::max(MeasureMeterWidth(), ScaleForDpi(32, dpi_));
         const int gap = ScaleForDpi(6, dpi_);
         const int defaultHeight = ScaleForDpi(36, dpi_);
 
@@ -836,22 +887,20 @@ private:
 
                 const int y = taskbarRect.top + (taskbarHeight - height) / 2;
 
-                // Default: leave room for the clock and show-desktop button
-                // at the far right of the taskbar.
-                int x = taskbarRect.right - ScaleForDpi(110, dpi_) - width - gap;
-
-                // Prefer the empty space just left of the tray area so the
-                // meter never covers tray icons or the clock.
+                // Where the tray (or at least the clock) starts; the meter
+                // always stays to the left of it.
                 const HWND tray =
                     FindWindowExW(taskbar, nullptr, L"TrayNotifyWnd", nullptr);
                 RECT trayRect{};
-                if (tray != nullptr &&
-                    TryGetWindowRect(tray, &trayRect) &&
+                int trayLeft = static_cast<int>(taskbarRect.right) -
+                               ScaleForDpi(110, dpi_);
+                if (tray != nullptr && TryGetWindowRect(tray, &trayRect) &&
                     trayRect.right > trayRect.left) {
-                    x = trayRect.left - width - gap;
+                    trayLeft = static_cast<int>(trayRect.left);
                 } else {
                     HWND clock =
-                        FindWindowExW(taskbar, nullptr, L"TrayClockWClass", nullptr);
+                        FindWindowExW(taskbar, nullptr, L"TrayClockWClass",
+                                      nullptr);
                     if (clock == nullptr && tray != nullptr) {
                         clock = FindWindowExW(tray, nullptr, L"TrayClockWClass",
                                               nullptr);
@@ -859,11 +908,35 @@ private:
                     RECT clockRect{};
                     if (clock != nullptr &&
                         TryGetWindowRect(clock, &clockRect)) {
-                        x = clockRect.left - width - gap;
+                        trayLeft = static_cast<int>(clockRect.left);
                     }
                 }
 
-                x = std::max(static_cast<int>(taskbarRect.left) + gap, x);
+                // Automatic gap: the meter takes half of whatever free space
+                // is left between the last taskbar button and the tray, kept
+                // within a readable range. Wide taskbars therefore get a
+                // little breathing room, crowded ones stay close to the tray.
+                const int minGap = ScaleForDpi(4, dpi_);
+                const int maxGap = ScaleForDpi(16, dpi_);
+                const int occupiedRight =
+                    FindTaskbarOccupiedRightEdge(taskbar, taskbarRect, trayLeft);
+                const int freeSpace = trayLeft - occupiedRight - width;
+                const int autoGap =
+                    std::clamp(freeSpace / 2, minGap, maxGap);
+
+                int x = trayLeft - width - autoGap;
+
+                // Never slide over the app buttons ...
+                const int leftLimit =
+                    std::max(static_cast<int>(taskbarRect.left) + minGap,
+                             occupiedRight + minGap);
+                x = std::max(leftLimit, x);
+
+                // ... and never cover the tray or the clock. On a completely
+                // full taskbar the meter overlaps the last app button rather
+                // than hiding the time.
+                x = std::min(x, trayLeft - width - minGap);
+                x = std::max(static_cast<int>(taskbarRect.left), x);
 
                 PlaceMeter(x, y, width, height);
                 if (overlayVisible_ && !IsWindowVisible(window_)) {
@@ -1019,6 +1092,26 @@ private:
         font.lfQuality = ANTIALIASED_QUALITY;
         StringCchCopyW(font.lfFaceName, _countof(font.lfFaceName), L"Segoe UI");
         textFont_ = CreateFontIndirectW(&font);
+
+        LOGFONTW iconFont{};
+        iconFont.lfHeight = -ScaleForDpi(11, dpi_);
+        iconFont.lfWeight = FW_NORMAL;
+        iconFont.lfQuality = ANTIALIASED_QUALITY;
+        StringCchCopyW(iconFont.lfFaceName, _countof(iconFont.lfFaceName),
+                       kIconFontFace);
+        iconFont_ = CreateFontIndirectW(&iconFont);
+
+        // Older systems may not ship Segoe MDL2 Assets; fall back to the plain
+        // Unicode arrows drawn with the text font.
+        iconFontUsable_ = iconFont_ != nullptr && HasIconGlyphs();
+        if (!iconFontUsable_) {
+            DeleteObject(iconFont_);
+            iconFont_ = nullptr;
+        }
+
+        iconWidth_ = MeasureGlyphWidth(
+            iconFontUsable_ ? iconFont_ : textFont_,
+            iconFontUsable_ ? kDownloadIconGlyph : kDownloadFallbackGlyph);
     }
 
     void DeleteFonts() {
@@ -1026,7 +1119,85 @@ private:
             DeleteObject(textFont_);
             textFont_ = nullptr;
         }
+
+        if (iconFont_ != nullptr) {
+            DeleteObject(iconFont_);
+            iconFont_ = nullptr;
+        }
+
+        iconFontUsable_ = false;
+        iconWidth_ = 0;
     }
+
+    bool HasIconGlyphs() const {
+        HDC deviceContext = GetDC(nullptr);
+        if (deviceContext == nullptr) {
+            return false;
+        }
+
+        HGDIOBJ oldFont = SelectObject(deviceContext, iconFont_);
+        const wchar_t glyphs[2] = {0xE896, 0xE898};
+        WORD indices[2] = {};
+        const DWORD count = GetGlyphIndicesW(
+            deviceContext, glyphs, 2, indices, GGI_MARK_NONEXISTING_GLYPHS);
+        SelectObject(deviceContext, oldFont);
+        ReleaseDC(nullptr, deviceContext);
+
+        return count != GDI_ERROR && indices[0] != 0xFFFF && indices[1] != 0xFFFF;
+    }
+
+    int MeasureGlyphWidth(HFONT font, const wchar_t* text) const {
+        if (font == nullptr || text == nullptr) {
+            return 0;
+        }
+
+        HDC deviceContext = GetDC(nullptr);
+        if (deviceContext == nullptr) {
+            return ScaleForDpi(8, dpi_);
+        }
+
+        HGDIOBJ oldFont = SelectObject(deviceContext, font);
+        SIZE size{};
+        GetTextExtentPoint32W(deviceContext, text,
+                              static_cast<int>(std::wcslen(text)), &size);
+        SelectObject(deviceContext, oldFont);
+        ReleaseDC(nullptr, deviceContext);
+        return size.cx;
+    }
+
+    // The window is only as wide as its content, so the readings sit right
+    // next to the tray icons instead of leaving an empty strip to the right.
+    int MeasureMeterWidth() const {
+        if (textFont_ == nullptr) {
+            return ScaleForDpi(110, dpi_);
+        }
+
+        HDC deviceContext = GetDC(nullptr);
+        if (deviceContext == nullptr) {
+            return ScaleForDpi(110, dpi_);
+        }
+
+        SIZE downloadSize{};
+        SIZE uploadSize{};
+        HGDIOBJ oldFont = SelectObject(deviceContext, textFont_);
+        GetTextExtentPoint32W(deviceContext, downloadText_.c_str(),
+                              static_cast<int>(downloadText_.size()),
+                              &downloadSize);
+        GetTextExtentPoint32W(deviceContext, uploadText_.c_str(),
+                              static_cast<int>(uploadText_.size()),
+                              &uploadSize);
+        SelectObject(deviceContext, oldFont);
+        ReleaseDC(nullptr, deviceContext);
+
+        const int textWidth = std::max(downloadSize.cx, uploadSize.cx);
+        return MeterLeftPadding() + iconWidth_ + MeterIconGap() + textWidth +
+               MeterRightPadding();
+    }
+
+    int MeterLeftPadding() const { return ScaleForDpi(4, dpi_); }
+    int MeterIconGap() const { return ScaleForDpi(4, dpi_); }
+    // A little slack so DrawText never has to ellipsise the measured text.
+    int MeterRightPadding() const { return ScaleForDpi(6, dpi_); }
 
     void PaintMeter() {
         if (window_ == nullptr || textFont_ == nullptr) {
@@ -1055,29 +1226,42 @@ private:
                         static_cast<std::size_t>(height) * 4);
 
         SetBkMode(meterDc_, TRANSPARENT);
-        HGDIOBJ oldFont = SelectObject(meterDc_, textFont_);
 
         // White on black makes the antialiased glyphs a coverage mask, which
         // ColorizeMeterSurface() turns into premultiplied coloured pixels.
         SetTextColor(meterDc_, RGB(255, 255, 255));
 
-        const int left = ScaleForDpi(8, dpi_);
-        const int right = width - ScaleForDpi(2, dpi_);
+        // Same layout the window width was measured from: icon, gap, reading.
+        const int left = MeterLeftPadding();
+        const int right = width - MeterRightPadding();
+        const int iconRight = left + iconWidth_;
+        const int textLeft = iconRight + MeterIconGap();
         // Split the surface in half so both rates fit any taskbar size.
         const int lineHeight = height / 2;
 
-        const std::wstring downloadLine = L"\x2193  " + downloadText_;
-        const std::wstring uploadLine = L"\x2191  " + uploadText_;
+        HFONT iconFont = iconFontUsable_ ? iconFont_ : textFont_;
+        const wchar_t* downloadGlyph =
+            iconFontUsable_ ? kDownloadIconGlyph : kDownloadFallbackGlyph;
+        const wchar_t* uploadGlyph =
+            iconFontUsable_ ? kUploadIconGlyph : kUploadFallbackGlyph;
 
-        RECT downloadRect{left, 0, right, lineHeight};
-        DrawTextW(meterDc_, downloadLine.c_str(), -1, &downloadRect,
+        HGDIOBJ previousIconFont = SelectObject(meterDc_, iconFont);
+        RECT downloadIconRect{left, 0, iconRight, lineHeight};
+        DrawTextW(meterDc_, downloadGlyph, -1, &downloadIconRect,
+                  DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        RECT uploadIconRect{left, lineHeight, iconRight, height};
+        DrawTextW(meterDc_, uploadGlyph, -1, &uploadIconRect,
+                  DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        SelectObject(meterDc_, previousIconFont);
+
+        HGDIOBJ previousTextFont = SelectObject(meterDc_, textFont_);
+        RECT downloadRect{textLeft, 0, right, lineHeight};
+        DrawTextW(meterDc_, downloadText_.c_str(), -1, &downloadRect,
                   DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-
-        RECT uploadRect{left, lineHeight, right, height};
-        DrawTextW(meterDc_, uploadLine.c_str(), -1, &uploadRect,
+        RECT uploadRect{textLeft, lineHeight, right, height};
+        DrawTextW(meterDc_, uploadText_.c_str(), -1, &uploadRect,
                   DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-
-        SelectObject(meterDc_, oldFont);
+        SelectObject(meterDc_, previousTextFont);
 
         ColorizeMeterSurface(width, height, lineHeight);
         PresentMeterSurface(width, height);
@@ -1150,6 +1334,9 @@ private:
     bool trayIconAdded_ = false;
     bool overlayVisible_ = true;
     bool startupEnabled_ = false;
+    HFONT iconFont_ = nullptr;
+    bool iconFontUsable_ = false;
+    int iconWidth_ = 0;
     HDC meterDc_ = nullptr;
     HBITMAP meterBitmap_ = nullptr;
     HGDIOBJ meterPreviousBitmap_ = nullptr;
