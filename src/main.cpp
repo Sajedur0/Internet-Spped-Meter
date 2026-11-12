@@ -18,12 +18,19 @@
 #define WINVER 0x0A00
 #endif
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 
+// netioapi.h needs the Winsock address declarations on MinGW and works with
+// the same include order on the Microsoft Windows SDK.
+#include <winsock2.h>
 #include <windows.h>
-#include <iphlpapi.h>
 #include <netioapi.h>
+#include <iphlpapi.h>
 #include <shellapi.h>
 #include <strsafe.h>
 
@@ -681,19 +688,25 @@ private:
         const int gap = ScaleForDpi(8, dpi_);
         const RECT& workArea = monitorInfo.rcWork;
         const RECT& fullArea = monitorInfo.rcMonitor;
+        const int workLeft = static_cast<int>(workArea.left);
+        const int workTop = static_cast<int>(workArea.top);
+        const int workRight = static_cast<int>(workArea.right);
+        const int workBottom = static_cast<int>(workArea.bottom);
+        const int fullTop = static_cast<int>(fullArea.top);
+        const int fullBottom = static_cast<int>(fullArea.bottom);
 
-        int x = workArea.right - width - gap;
-        int y = workArea.bottom - height - gap;
+        int x = workRight - width - gap;
+        int y = workBottom - height - gap;
 
         // On the normal bottom taskbar this positions the overlay immediately
         // above the notification area. For a taskbar on another edge, keep it
         // at the nearest visible right/bottom corner of the work area.
-        if (workArea.bottom == fullArea.bottom && workArea.top > fullArea.top) {
-            y = workArea.top + gap;
+        if (workBottom == fullBottom && workTop > fullTop) {
+            y = workTop + gap;
         }
 
-        x = std::max(workArea.left + gap, x);
-        y = std::max(workArea.top + gap, y);
+        x = std::max(workLeft + gap, x);
+        y = std::max(workTop + gap, y);
 
         SetWindowPos(window_, HWND_TOPMOST, x, y, width, height,
                      SWP_NOACTIVATE | SWP_NOOWNERZORDER);
