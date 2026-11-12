@@ -12,6 +12,7 @@ A **native C++ / Win32 API** app that shows live download and upload speed direc
 - Text-only meter sitting directly on the taskbar (inside the taskbar strip, left of the tray icons/clock): no background panel or border, only the icons and numbers are drawn, with light/dark theme aware text colors
 - Uses Windows' own **Download** (`E896`) and **Upload** (`E898`) icons from *Segoe MDL2 Assets*, with a plain Unicode arrow fallback on systems without that font
 - The meter window is sized to its content, so the readings sit right next to the tray icons with no empty strip on the right
+- Automatic gap: the meter is parked in the free space left of the tray and the distance to it is computed from the room that is actually available (4–16 px, DPI scaled), so a wide taskbar gets breathing room and a crowded one stays tight against the tray
 - Follows the taskbar when it moves or resizes, hides with it when auto-hide is on, re-places itself after Explorer restarts, and gets out of the way while a fullscreen app/game is in the foreground
 - Tray icon:
   - **Left-click:** Show/hide the meter

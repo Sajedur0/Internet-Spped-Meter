@@ -306,6 +306,48 @@ bool IsFullScreenAppActiveOn(HMONITOR monitor) {
            windowRect.bottom >= monitorInfo.rcMonitor.bottom;
 }
 
+// Right edge of the part of the taskbar that is already in use (Start,
+// search, app buttons, language widget...). The meter is parked after it, so
+// the automatic gap is measured against real free space instead of a guess.
+int FindTaskbarOccupiedRightEdge(HWND taskbar, const RECT& taskbarRect,
+                                 int trayLeft) {
+    int occupiedRight = static_cast<int>(taskbarRect.left);
+
+    for (HWND child = GetWindow(taskbar, GW_CHILD); child != nullptr;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        if (!IsWindowVisible(child)) {
+            continue;
+        }
+
+        wchar_t className[64]{};
+        if (GetClassNameW(child, className, _countof(className)) == 0) {
+            continue;
+        }
+
+        // The tray (with its clock) and the show-desktop button live to the
+        // right of the meter and must not count as occupied space.
+        if (std::wcscmp(className, L"TrayNotifyWnd") == 0 ||
+            std::wcscmp(className, L"TrayShowDesktopButtonWClass") == 0 ||
+            std::wcscmp(className, L"TrayClockWClass") == 0) {
+            continue;
+        }
+
+        RECT childRect{};
+        // Skip containers that run into (or across) the tray area: they say
+        // nothing about where the free space starts.
+        if (!TryGetWindowRect(child, &childRect) ||
+            childRect.right <= childRect.left ||
+            childRect.left >= trayLeft ||
+            childRect.right > trayLeft) {
+            continue;
+        }
+
+        occupiedRight = std::max(occupiedRight, static_cast<int>(childRect.right));
+    }
+
+    return occupiedRight;
+}
+
 bool IsLightTheme() {
     DWORD value = 0;
     DWORD valueSize = sizeof(value);
@@ -845,22 +887,20 @@ private:
 
                 const int y = taskbarRect.top + (taskbarHeight - height) / 2;
 
-                // Default: leave room for the clock and show-desktop button
-                // at the far right of the taskbar.
-                int x = taskbarRect.right - ScaleForDpi(110, dpi_) - width - gap;
-
-                // Prefer the empty space just left of the tray area so the
-                // meter never covers tray icons or the clock.
+                // Where the tray (or at least the clock) starts; the meter
+                // always stays to the left of it.
                 const HWND tray =
                     FindWindowExW(taskbar, nullptr, L"TrayNotifyWnd", nullptr);
                 RECT trayRect{};
-                if (tray != nullptr &&
-                    TryGetWindowRect(tray, &trayRect) &&
+                int trayLeft = static_cast<int>(taskbarRect.right) -
+                               ScaleForDpi(110, dpi_);
+                if (tray != nullptr && TryGetWindowRect(tray, &trayRect) &&
                     trayRect.right > trayRect.left) {
-                    x = trayRect.left - width - gap;
+                    trayLeft = static_cast<int>(trayRect.left);
                 } else {
                     HWND clock =
-                        FindWindowExW(taskbar, nullptr, L"TrayClockWClass", nullptr);
+                        FindWindowExW(taskbar, nullptr, L"TrayClockWClass",
+                                      nullptr);
                     if (clock == nullptr && tray != nullptr) {
                         clock = FindWindowExW(tray, nullptr, L"TrayClockWClass",
                                               nullptr);
@@ -868,11 +908,35 @@ private:
                     RECT clockRect{};
                     if (clock != nullptr &&
                         TryGetWindowRect(clock, &clockRect)) {
-                        x = clockRect.left - width - gap;
+                        trayLeft = static_cast<int>(clockRect.left);
                     }
                 }
 
-                x = std::max(static_cast<int>(taskbarRect.left) + gap, x);
+                // Automatic gap: the meter takes half of whatever free space
+                // is left between the last taskbar button and the tray, kept
+                // within a readable range. Wide taskbars therefore get a
+                // little breathing room, crowded ones stay close to the tray.
+                const int minGap = ScaleForDpi(4, dpi_);
+                const int maxGap = ScaleForDpi(16, dpi_);
+                const int occupiedRight =
+                    FindTaskbarOccupiedRightEdge(taskbar, taskbarRect, trayLeft);
+                const int freeSpace = trayLeft - occupiedRight - width;
+                const int autoGap =
+                    std::clamp(freeSpace / 2, minGap, maxGap);
+
+                int x = trayLeft - width - autoGap;
+
+                // Never slide over the app buttons ...
+                const int leftLimit =
+                    std::max(static_cast<int>(taskbarRect.left) + minGap,
+                             occupiedRight + minGap);
+                x = std::max(leftLimit, x);
+
+                // ... and never cover the tray or the clock. On a completely
+                // full taskbar the meter overlaps the last app button rather
+                // than hiding the time.
+                x = std::min(x, trayLeft - width - minGap);
+                x = std::max(static_cast<int>(taskbarRect.left), x);
 
                 PlaceMeter(x, y, width, height);
                 if (overlayVisible_ && !IsWindowVisible(window_)) {
