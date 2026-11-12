@@ -336,8 +336,27 @@ void ConfigureDpiAwareness() {
         BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
 
     const HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    const FARPROC rawSetContext = user32 == nullptr
+                                      ? nullptr
+                                      : GetProcAddress(user32,
+                                                       "SetProcessDpiAwarenessContext");
+
+    // GetProcAddress deliberately returns FARPROC instead of a typed function
+    // pointer. This Win32 ABI-compatible cast is required for optional APIs.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type-mismatch"
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4191)
+#endif
     const auto setContext = reinterpret_cast<SetProcessDpiAwarenessContextFunction>(
-        GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+        rawSetContext);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
     if (setContext != nullptr &&
         setContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {

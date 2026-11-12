@@ -22,10 +22,6 @@ target_compile_features(InternetSpeedMeter PRIVATE cxx_std_17)
 target_compile_definitions(InternetSpeedMeter PRIVATE
     UNICODE
     _UNICODE
-    WIN32_LEAN_AND_MEAN
-    NOMINMAX
-    _WIN32_WINNT=0x0A00
-    WINVER=0x0A00
 )
 target_link_libraries(InternetSpeedMeter PRIVATE
     advapi32
@@ -37,16 +33,33 @@ target_link_libraries(InternetSpeedMeter PRIVATE
 
 if(MSVC)
     target_compile_options(InternetSpeedMeter PRIVATE
-        /W4
-        /permissive-
-        /EHsc
-        /utf-8
+        $<$<COMPILE_LANGUAGE:CXX>:/W4>
+        $<$<COMPILE_LANGUAGE:CXX>:/permissive->
+        $<$<COMPILE_LANGUAGE:CXX>:/EHsc>
+        $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
     )
 else()
     target_compile_options(InternetSpeedMeter PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
+    )
+endif()
+
+# GNU/MinGW needs this explicitly to select the wide-character GUI entry
+# point used by wWinMain. MSVC selects it automatically for this target.
+if(MINGW)
+    # CMake supplies -mwindows for WIN32 targets. The explicit subsystem is
+    # retained for Clang/Zig MinGW cross drivers as well as GNU ld.
+    target_link_options(InternetSpeedMeter PRIVATE
+        -municode
+        -Wl,--subsystem,windows
+    )
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT MSVC)
+    # Native Visual Studio generators already supply this for WIN32 targets.
+    target_link_options(InternetSpeedMeter PRIVATE
+        -municode
+        -Wl,--subsystem,windows
     )
 endif()
 
