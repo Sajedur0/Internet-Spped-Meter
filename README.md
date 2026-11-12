@@ -9,7 +9,7 @@ A **native C++ / Win32 API** app that shows live download and upload speed direc
 - Updates the upload/download rate every **1 second**
 - Reads Windows network byte counters via `GetIfTable2`; it does not use test traffic, packet capture, or external servers
 - Skips common virtual/loopback adapters and sums traffic from physical active adapters, reducing the chance of counting the same traffic twice
-- Small, always-on-top, click-through meter sitting directly on the taskbar (inside the taskbar strip, left of the tray icons/clock), with light/dark theme aware colors
+- Text-only meter sitting directly on the taskbar (inside the taskbar strip, left of the tray icons/clock): no background panel or border, only the arrows and numbers are drawn, with light/dark theme aware text colors
 - Follows the taskbar when it moves or resizes, hides with it when auto-hide is on, re-places itself after Explorer restarts, and gets out of the way while a fullscreen app/game is in the foreground
 - Tray icon:
   - **Left-click:** Show/hide the meter
@@ -24,7 +24,7 @@ A **native C++ / Win32 API** app that shows live download and upload speed direc
 
 Windows 10/11 does not provide a supported public API for placing another app's live text **inside** the notification area, and it is not possible to append a custom button to the taskbar without injecting code into Explorer. Injection or undocumented taskbar hacks risk crashes/breakage after Windows updates and are also bad from a security perspective.
 
-Therefore, this project uses a safe and stable approach: a tiny borderless, click-through window is positioned **inside the taskbar strip itself** — the same place the taskbar occupies, just left of the tray icons and clock — instead of floating above the work area. It is sized to the taskbar height and re-positioned every second, so it moves with the taskbar, hides with it when auto-hide is enabled, and comes back after Explorer restarts. Nothing is injected into or modified inside the Windows shell.
+Therefore, this project uses a safe and stable approach: a tiny borderless, click-through window is positioned **inside the taskbar strip itself** — the same place the taskbar occupies, just left of the tray icons and clock — instead of floating above the work area. The window is drawn with per-pixel alpha, so it has **no background at all**: only the antialiased glyphs are painted and the taskbar shows through around them. It is sized to the taskbar height and re-positioned every second, so it moves with the taskbar, hides with it when auto-hide is enabled, and comes back after Explorer restarts. Nothing is injected into or modified inside the Windows shell.
 
 ## Requirements
 
@@ -99,6 +99,7 @@ No administrator permission, service, or scheduled task is used.
 | --- | --- |
 | Language | C++17 |
 | UI | Direct Win32 + GDI; no GUI framework |
+| Transparency | Layered window painted with `UpdateLayeredWindow` + premultiplied per-pixel alpha (text only, no background) |
 | Network measurement | Windows IP Helper API (`GetIfTable2`) |
 | Update model | One UI timer, 1000 ms interval; no separate busy worker thread |
 | Background mode | Tray process + small topmost taskbar-level window |

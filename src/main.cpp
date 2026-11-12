@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -506,9 +507,9 @@ private:
             return false;
         }
 
-        // Fully opaque keeps the meter crisp over the taskbar (and avoids
-        // redraw ghosting when the shell repaints behind it).
-        SetLayeredWindowAttributes(window_, 0, 255, LWA_ALPHA);
+        // No SetLayeredWindowAttributes() call on purpose: the window is
+        // painted with UpdateLayeredWindow() and per-pixel alpha so only the
+        // text is visible, with nothing behind it.
         dpi_ = GetWindowDpi(window_);
         CreateFonts();
 
@@ -518,11 +519,11 @@ private:
 
         // The first sample establishes the baseline, so the first real rate
         // appears on the following one-second tick.
+        // UpdateSpeed() already places and paints the meter for the first
+        // sample, so only the initial show is left to do here.
         UpdateSpeed();
-        PositionMeter();
         if (overlayVisible_) {
             ShowWindow(window_, SW_SHOWNOACTIVATE);
-            UpdateWindow(window_);
         }
 
         SetTimer(window_, kUpdateTimerId, kUpdateIntervalMs, nullptr);
@@ -539,8 +540,8 @@ private:
             // the new taskbar.
             trayIconAdded_ = false;
             AddTrayIcon();
-            hasLastMeterPosition_ = false;
             PositionMeter();
+            PaintMeter();
             return 0;
         }
 
@@ -552,7 +553,11 @@ private:
                 return 0;
 
             case WM_PAINT:
-                PaintOverlay();
+                // A layered window is normally painted through
+                // UpdateLayeredWindow(); still validate the paint request and
+                // refresh the surface so a resize never leaves it blank.
+                ValidateRect(window_, nullptr);
+                PaintMeter();
                 return 0;
 
             case WM_ERASEBKGND:
@@ -570,16 +575,14 @@ private:
             case WM_DPICHANGED:
                 dpi_ = HIWORD(wParam);
                 CreateFonts();
-                hasLastMeterPosition_ = false;
                 PositionMeter();
-                InvalidateRect(window_, nullptr, TRUE);
+                PaintMeter();
                 return 0;
 
             case WM_DISPLAYCHANGE:
             case WM_SETTINGCHANGE:
-                hasLastMeterPosition_ = false;
                 PositionMeter();
-                InvalidateRect(window_, nullptr, FALSE);
+                PaintMeter();
                 return 0;
 
             case WM_POWERBROADCAST:
@@ -607,6 +610,7 @@ private:
             case WM_DESTROY:
                 KillTimer(window_, kUpdateTimerId);
                 RemoveTrayIcon();
+                DestroyMeterSurface();
                 DeleteFonts();
                 PostQuitMessage(0);
                 return 0;
@@ -753,8 +757,8 @@ private:
 
         if (overlayVisible_) {
             PositionMeter();
+            PaintMeter();
             ShowWindow(window_, SW_SHOWNOACTIVATE);
-            UpdateWindow(window_);
         } else {
             ShowWindow(window_, SW_HIDE);
         }
@@ -779,7 +783,7 @@ private:
         // Follow the taskbar if it moved/resized and hide with it when it
         // auto-hides. This runs once per second on the existing timer.
         PositionMeter();
-        InvalidateRect(window_, nullptr, FALSE);
+        PaintMeter();
         UpdateTrayTooltip();
     }
 
@@ -864,7 +868,6 @@ private:
                 PlaceMeter(x, y, width, height);
                 if (overlayVisible_ && !IsWindowVisible(window_)) {
                     ShowWindow(window_, SW_SHOWNOACTIVATE);
-                    UpdateWindow(window_);
                 }
                 return;
             }
@@ -891,7 +894,6 @@ private:
                 PlaceMeter(x, y, meterWidth, defaultHeight);
                 if (overlayVisible_ && !IsWindowVisible(window_)) {
                     ShowWindow(window_, SW_SHOWNOACTIVATE);
-                    UpdateWindow(window_);
                 }
                 return;
             }
@@ -933,43 +935,77 @@ private:
         PlaceMeter(x, y, width, height);
         if (overlayVisible_ && !IsWindowVisible(window_)) {
             ShowWindow(window_, SW_SHOWNOACTIVATE);
-            UpdateWindow(window_);
         }
     }
 
     void PlaceMeter(int x, int y, int width, int height) {
-        const bool sizeChanged = !hasLastMeterPosition_ ||
-                                 lastMeterWidth_ != width ||
-                                 lastMeterHeight_ != height;
-
-        lastMeterWidth_ = width;
-        lastMeterHeight_ = height;
-        hasLastMeterPosition_ = true;
-
         // Re-assert the position on every tick, not just when it changes: the
         // taskbar is a topmost window too and can end up above the meter after
         // user interaction. Moving it back to the top of the topmost band is
         // enough to keep the meter visible on the taskbar.
         SetWindowPos(window_, HWND_TOPMOST, x, y, width, height,
                      SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-
-        if (sizeChanged) {
-            ApplyRoundedRegion(width, height);
-        }
     }
 
-    void ApplyRoundedRegion(int width, int height) {
-        const int corner = std::max(ScaleForDpi(6, dpi_), 2);
-        HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1,
-                                         corner, corner);
-        if (region == nullptr) {
-            return;
+    // The meter has no background: it is drawn into an off-screen 32-bit
+    // surface and handed to Windows with per-pixel alpha, so only the glyphs
+    // are painted and the taskbar stays visible behind and between them.
+    bool EnsureMeterSurface(int width, int height) {
+        if (meterDc_ != nullptr && meterWidth_ == width && meterHeight_ == height) {
+            return true;
         }
 
-        if (SetWindowRgn(window_, region, TRUE) == 0) {
-            DeleteObject(region);
+        DestroyMeterSurface();
+
+        BITMAPINFO bitmapInfo{};
+        bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+        bitmapInfo.bmiHeader.biWidth = width;
+        bitmapInfo.bmiHeader.biHeight = -height;  // top-down rows
+        bitmapInfo.bmiHeader.biPlanes = 1;
+        bitmapInfo.bmiHeader.biBitCount = 32;
+        bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+        void* pixels = nullptr;
+        HDC screen = GetDC(nullptr);
+        if (screen == nullptr) {
+            return false;
         }
-        // On success Windows owns the region handle.
+
+        meterDc_ = CreateCompatibleDC(screen);
+        meterBitmap_ = CreateDIBSection(
+            screen, &bitmapInfo, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        ReleaseDC(nullptr, screen);
+
+        if (meterDc_ == nullptr || meterBitmap_ == nullptr || pixels == nullptr) {
+            DestroyMeterSurface();
+            return false;
+        }
+
+        meterPreviousBitmap_ = SelectObject(meterDc_, meterBitmap_);
+        meterPixels_ = pixels;
+        meterWidth_ = width;
+        meterHeight_ = height;
+        return true;
+    }
+
+    void DestroyMeterSurface() {
+        if (meterDc_ != nullptr) {
+            if (meterPreviousBitmap_ != nullptr) {
+                SelectObject(meterDc_, meterPreviousBitmap_);
+            }
+            DeleteDC(meterDc_);
+        }
+
+        if (meterBitmap_ != nullptr) {
+            DeleteObject(meterBitmap_);
+        }
+
+        meterDc_ = nullptr;
+        meterBitmap_ = nullptr;
+        meterPreviousBitmap_ = nullptr;
+        meterPixels_ = nullptr;
+        meterWidth_ = 0;
+        meterHeight_ = 0;
     }
 
     void CreateFonts() {
@@ -978,7 +1014,9 @@ private:
         LOGFONTW font{};
         font.lfHeight = -ScaleForDpi(9, dpi_);
         font.lfWeight = FW_SEMIBOLD;
-        font.lfQuality = CLEARTYPE_QUALITY;
+        // ClearType needs an opaque background, so the transparent meter uses
+        // plain grayscale antialiasing and colourises the coverage mask.
+        font.lfQuality = ANTIALIASED_QUALITY;
         StringCchCopyW(font.lfFaceName, _countof(font.lfFaceName), L"Segoe UI");
         textFont_ = CreateFontIndirectW(&font);
     }
@@ -990,56 +1028,116 @@ private:
         }
     }
 
-    void PaintOverlay() {
-        PAINTSTRUCT paint{};
-        HDC deviceContext = BeginPaint(window_, &paint);
+    void PaintMeter() {
+        if (window_ == nullptr || textFont_ == nullptr) {
+            return;
+        }
 
         RECT client{};
-        GetClientRect(window_, &client);
-        const int corner = std::max(ScaleForDpi(6, dpi_), 2);
+        if (!GetClientRect(window_, &client)) {
+            return;
+        }
 
-        // Match the taskbar light/dark theme so the meter stays readable on
-        // both. The registry value is re-read on every paint, so a theme
-        // change applies on the next one-second tick.
-        const bool light = IsLightTheme();
-        const COLORREF backgroundColor = light ? RGB(245, 245, 245) : RGB(20, 25, 34);
-        const COLORREF borderColor = light ? RGB(190, 190, 190) : RGB(60, 76, 99);
-        const COLORREF downloadColor = light ? RGB(0, 90, 180) : RGB(94, 211, 255);
-        const COLORREF uploadColor = light ? RGB(0, 130, 60) : RGB(120, 232, 163);
+        const int width = client.right - client.left;
+        const int height = client.bottom - client.top;
+        if (width <= 0 || height <= 0) {
+            return;
+        }
 
-        HBRUSH background = CreateSolidBrush(backgroundColor);
-        HPEN border = CreatePen(PS_SOLID, 1, borderColor);
-        HGDIOBJ oldBrush = SelectObject(deviceContext, background);
-        HGDIOBJ oldPen = SelectObject(deviceContext, border);
-        RoundRect(deviceContext, client.left, client.top,
-                  client.right, client.bottom, corner, corner);
-        SelectObject(deviceContext, oldBrush);
-        SelectObject(deviceContext, oldPen);
-        DeleteObject(border);
-        DeleteObject(background);
+        if (!EnsureMeterSurface(width, height)) {
+            return;
+        }
 
-        SetBkMode(deviceContext, TRANSPARENT);
-        HGDIOBJ oldFont = SelectObject(deviceContext, textFont_);
+        // Begin fully transparent so only the arrows and numbers are visible;
+        // there is no background box or border behind them.
+        std::memset(meterPixels_, 0,
+                    static_cast<std::size_t>(width) *
+                        static_cast<std::size_t>(height) * 4);
+
+        SetBkMode(meterDc_, TRANSPARENT);
+        HGDIOBJ oldFont = SelectObject(meterDc_, textFont_);
+
+        // White on black makes the antialiased glyphs a coverage mask, which
+        // ColorizeMeterSurface() turns into premultiplied coloured pixels.
+        SetTextColor(meterDc_, RGB(255, 255, 255));
+
         const int left = ScaleForDpi(8, dpi_);
-        const int right = client.right - ScaleForDpi(6, dpi_);
-        // Split the client area in half so the two rates fit any taskbar size.
-        const int lineHeight = (client.bottom - client.top) / 2;
+        const int right = width - ScaleForDpi(2, dpi_);
+        // Split the surface in half so both rates fit any taskbar size.
+        const int lineHeight = height / 2;
 
-        std::wstring downloadLine = L"\x2193  " + downloadText_;
-        std::wstring uploadLine = L"\x2191  " + uploadText_;
+        const std::wstring downloadLine = L"\x2193  " + downloadText_;
+        const std::wstring uploadLine = L"\x2191  " + uploadText_;
 
-        RECT downloadRect{left, client.top, right, client.top + lineHeight};
-        SetTextColor(deviceContext, downloadColor);
-        DrawTextW(deviceContext, downloadLine.c_str(), -1, &downloadRect,
+        RECT downloadRect{left, 0, right, lineHeight};
+        DrawTextW(meterDc_, downloadLine.c_str(), -1, &downloadRect,
                   DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
-        RECT uploadRect{left, client.top + lineHeight, right, client.bottom};
-        SetTextColor(deviceContext, uploadColor);
-        DrawTextW(deviceContext, uploadLine.c_str(), -1, &uploadRect,
+        RECT uploadRect{left, lineHeight, right, height};
+        DrawTextW(meterDc_, uploadLine.c_str(), -1, &uploadRect,
                   DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
-        SelectObject(deviceContext, oldFont);
-        EndPaint(window_, &paint);
+        SelectObject(meterDc_, oldFont);
+
+        ColorizeMeterSurface(width, height, lineHeight);
+        PresentMeterSurface(width, height);
+    }
+
+    // Repaint the coverage mask with the taskbar-appropriate text colours and
+    // store the result as premultiplied ARGB, which is what the layered window
+    // expects.
+    void ColorizeMeterSurface(int width, int height, int lineHeight) {
+        // The registry value is read on every paint, so a theme switch applies
+        // on the next one-second tick.
+        const bool light = IsLightTheme();
+        const COLORREF downloadColor =
+            light ? RGB(0, 90, 180) : RGB(94, 211, 255);
+        const COLORREF uploadColor =
+            light ? RGB(0, 120, 60) : RGB(120, 232, 163);
+
+        auto* pixels = static_cast<std::uint32_t*>(meterPixels_);
+        for (int y = 0; y < height; ++y) {
+            const COLORREF color = y < lineHeight ? downloadColor : uploadColor;
+            const unsigned int red = GetRValue(color);
+            const unsigned int green = GetGValue(color);
+            const unsigned int blue = GetBValue(color);
+
+            auto* row = pixels + static_cast<std::size_t>(y) * width;
+            for (int x = 0; x < width; ++x) {
+                // The text was drawn white, so any channel is the coverage.
+                const unsigned int alpha = row[x] & 0xFFu;
+                if (alpha == 0) {
+                    continue;
+                }
+
+                row[x] = (alpha << 24) | ((red * alpha / 255u) << 16) |
+                         ((green * alpha / 255u) << 8) | (blue * alpha / 255u);
+            }
+        }
+    }
+
+    void PresentMeterSurface(int width, int height) {
+        RECT windowRect{};
+        if (!GetWindowRect(window_, &windowRect)) {
+            return;
+        }
+
+        HDC screen = GetDC(nullptr);
+        if (screen == nullptr) {
+            return;
+        }
+
+        POINT destination{windowRect.left, windowRect.top};
+        POINT source{0, 0};
+        SIZE size{width, height};
+        BLENDFUNCTION blend{};
+        blend.BlendOp = AC_SRC_OVER;
+        blend.SourceConstantAlpha = 255;
+        blend.AlphaFormat = AC_SRC_ALPHA;
+
+        UpdateLayeredWindow(window_, screen, &destination, &size, meterDc_,
+                            &source, 0, &blend, ULW_ALPHA);
+        ReleaseDC(nullptr, screen);
     }
 
     inline static SpeedMeterApplication* singleton_ = nullptr;
@@ -1052,9 +1150,12 @@ private:
     bool trayIconAdded_ = false;
     bool overlayVisible_ = true;
     bool startupEnabled_ = false;
-    bool hasLastMeterPosition_ = false;
-    int lastMeterWidth_ = 0;
-    int lastMeterHeight_ = 0;
+    HDC meterDc_ = nullptr;
+    HBITMAP meterBitmap_ = nullptr;
+    HGDIOBJ meterPreviousBitmap_ = nullptr;
+    void* meterPixels_ = nullptr;
+    int meterWidth_ = 0;
+    int meterHeight_ = 0;
     SpeedSampler sampler_{};
     std::wstring downloadText_ = L"0 B/s";
     std::wstring uploadText_ = L"0 B/s";
