@@ -9,7 +9,9 @@ A **native C++ / Win32 API** app that shows live download and upload speed direc
 - Updates the upload/download rate every **1 second**
 - Reads Windows network byte counters via `GetIfTable2`; it does not use test traffic, packet capture, or external servers
 - Skips common virtual/loopback adapters and sums traffic from physical active adapters, reducing the chance of counting the same traffic twice
-- Text-only meter sitting directly on the taskbar (inside the taskbar strip, left of the tray icons/clock): no background panel or border, only the arrows and numbers are drawn, with light/dark theme aware text colors
+- Text-only meter sitting directly on the taskbar (inside the taskbar strip, left of the tray icons/clock): no background panel or border, only the icons and numbers are drawn, with light/dark theme aware text colors
+- Uses Windows' own **Download** (`E896`) and **Upload** (`E898`) icons from *Segoe MDL2 Assets*, with a plain Unicode arrow fallback on systems without that font
+- The meter window is sized to its content, so the readings sit right next to the tray icons with no empty strip on the right
 - Follows the taskbar when it moves or resizes, hides with it when auto-hide is on, re-places itself after Explorer restarts, and gets out of the way while a fullscreen app/game is in the foreground
 - Tray icon:
   - **Left-click:** Show/hide the meter
