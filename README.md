@@ -1,6 +1,6 @@
 # Internet Speed Meter for Windows
 
-A **native C++ / Win32 API** app that shows live download and upload speed on the right side of the Windows taskbar (just above the notification area). When the app starts, it does not open a large main window — it lives in the tray and keeps running in the background.
+A **native C++ / Win32 API** app that shows live download and upload speed directly on the Windows taskbar (inside the taskbar strip, just left of the tray icons and clock). When the app starts, it does not open a large main window — it lives in the tray and keeps running in the background.
 
 > **Why C++/Win32?** It is the best choice for low RAM and CPU usage. There is no Electron, browser engine, Java, or .NET runtime here; only Windows' own APIs, GDI, and the IP Helper API are used. As a result, the app is small, fast, and very light when idle. Actual RAM usage depends on the Windows version, DPI, and other running apps.
 
@@ -9,10 +9,11 @@ A **native C++ / Win32 API** app that shows live download and upload speed on th
 - Updates the upload/download rate every **1 second**
 - Reads Windows network byte counters via `GetIfTable2`; it does not use test traffic, packet capture, or external servers
 - Skips common virtual/loopback adapters and sums traffic from physical active adapters, reducing the chance of counting the same traffic twice
-- Small, always-on-top, click-through overlay above the notification area on the right side of the taskbar
+- Small, always-on-top, click-through meter sitting directly on the taskbar (inside the taskbar strip, left of the tray icons/clock), with light/dark theme aware colors
+- Follows the taskbar when it moves or resizes, hides with it when auto-hide is on, re-places itself after Explorer restarts, and gets out of the way while a fullscreen app/game is in the foreground
 - Tray icon:
   - **Left-click:** Show/hide the meter
-  - **Right-click:** Show speed meter, Start with Windows, About, Exit
+  - **Right-click:** Show speed on taskbar, Start with Windows, About, Exit
 - When **Start with Windows** is enabled, it starts automatically at login for the current user; no administrator permission is required
 - Only one instance runs, even if launched multiple times
 - Tries to re-add the tray icon even if Explorer restarts
@@ -21,9 +22,9 @@ A **native C++ / Win32 API** app that shows live download and upload speed on th
 
 ## An important Windows limitation
 
-Windows 10/11 does not provide a supported public API for placing another app's live text **inside** the notification area. Using code injection into Explorer or undocumented taskbar hacks risks crashes/breakage after Windows updates and is also bad from a security perspective.
+Windows 10/11 does not provide a supported public API for placing another app's live text **inside** the notification area, and it is not possible to append a custom button to the taskbar without injecting code into Explorer. Injection or undocumented taskbar hacks risk crashes/breakage after Windows updates and are also bad from a security perspective.
 
-Therefore, this project uses a safe and stable approach: it shows a small overlay **just above** the taskbar's notification area. It looks like it is on the right side of the taskbar, but it does not modify the Windows shell.
+Therefore, this project uses a safe and stable approach: a tiny borderless, click-through window is positioned **inside the taskbar strip itself** — the same place the taskbar occupies, just left of the tray icons and clock — instead of floating above the work area. It is sized to the taskbar height and re-positioned every second, so it moves with the taskbar, hides with it when auto-hide is enabled, and comes back after Explorer restarts. Nothing is injected into or modified inside the Windows shell.
 
 ## Requirements
 
@@ -60,7 +61,7 @@ build\Release\InternetSpeedMeter.exe
 ```
 
 1. In the first second, a baseline is taken from the counters; actual speed will be shown from the next update.
-2. You will see two lines at the bottom-right of the desktop:
+2. You will see the meter sitting **on the taskbar** itself, just left of the tray icons/clock, with two lines:
    - `↓` Download
    - `↑` Upload
 3. Right-click the tray icon and tick **Start with Windows**, and the app will keep running in the background after your next Windows login.
@@ -70,7 +71,7 @@ build\Release\InternetSpeedMeter.exe
 
 The app only uses the current user's registry:
 
-- Overlay visibility: `HKCU\Software\InternetSpeedMeter\ShowOverlay`
+- Meter visibility: `HKCU\Software\InternetSpeedMeter\ShowOverlay`
 - Start with Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\InternetSpeedMeter`
 
 No administrator permission, service, or scheduled task is used.
@@ -100,9 +101,9 @@ No administrator permission, service, or scheduled task is used.
 | UI | Direct Win32 + GDI; no GUI framework |
 | Network measurement | Windows IP Helper API (`GetIfTable2`) |
 | Update model | One UI timer, 1000 ms interval; no separate busy worker thread |
-| Background mode | Tray process + hidden popup overlay |
+| Background mode | Tray process + small topmost taskbar-level window |
 | Memory/CPU goal | Minimize runtime/framework and limit idle wake-ups |
-| Taskbar integration | Supported tray API + overlay; no Explorer injection |
+| Taskbar integration | Meter window aligned to `Shell_TrayWnd` next to the tray/clock; no Explorer injection |
 
 ## Development notes
 
