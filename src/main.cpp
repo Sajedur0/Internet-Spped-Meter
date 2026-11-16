@@ -30,6 +30,7 @@
 #include <winsock2.h>
 #include <ws2ipdef.h>
 #include <windows.h>
+#include <commctrl.h>
 #include <iphlpapi.h>
 #include <shellapi.h>
 #include <strsafe.h>
@@ -73,6 +74,15 @@ constexpr UINT kMenuToggleOverlay = 1001;
 constexpr UINT kMenuToggleStartup = 1002;
 constexpr UINT kMenuAbout = 1003;
 constexpr UINT kMenuExit = 1004;
+
+HRESULT CALLBACK AboutDialogCallback(HWND, UINT notification, WPARAM, LPARAM link,
+                                     LONG_PTR) {
+    if (notification == TDN_HYPERLINK_CLICKED && link != 0) {
+        ShellExecuteW(nullptr, L"open", reinterpret_cast<LPCWSTR>(link),
+                      nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    return S_OK;
+}
 
 struct InterfaceCounters {
     std::uint64_t receivedBytes = 0;
@@ -711,16 +721,40 @@ private:
                 wchar_t aboutText[512]{};
                 StringCchPrintfW(
                     aboutText, _countof(aboutText),
-                    L"Internet Speed Meter\n\n"
                     L"Version: %ls\n"
-                    L"Developer: %ls\n\n"
+                    L"Developer: <a href=\"https://github.com/Sajedur0\">%ls</a>\n\n"
                     L"Native Win32 network speed display.\n"
                     L"The meter sits on the taskbar, left of the tray icons.\n"
                     L"Left-click the tray icon to show or hide the meter.\n"
                     L"Right-click it for startup and exit options.",
                     kApplicationVersion, kDeveloperName);
-                MessageBoxW(window_, aboutText, kApplicationName,
-                            MB_OK | MB_ICONINFORMATION);
+
+                TASKDIALOGCONFIG dialog{};
+                dialog.cbSize = sizeof(dialog);
+                dialog.hwndParent = window_;
+                dialog.dwFlags = TDF_ENABLE_HYPERLINKS |
+                                 TDF_ALLOW_DIALOG_CANCELLATION;
+                dialog.dwCommonButtons = TDCBF_OK_BUTTON;
+                dialog.pszWindowTitle = kApplicationName;
+                dialog.pszMainInstruction = kApplicationName;
+                dialog.pszContent = aboutText;
+                dialog.pszMainIcon = TD_INFORMATION_ICON;
+                dialog.pfCallback = AboutDialogCallback;
+
+                if (FAILED(TaskDialogIndirect(&dialog, nullptr, nullptr, nullptr))) {
+                    // Keep About usable if Task Dialog is unavailable.
+                    wchar_t fallbackText[512]{};
+                    StringCchPrintfW(
+                        fallbackText, _countof(fallbackText),
+                        L"Version: %ls\nDeveloper: %ls\n\n"
+                        L"Native Win32 network speed display.\n"
+                        L"The meter sits on the taskbar, left of the tray icons.\n"
+                        L"Left-click the tray icon to show or hide the meter.\n"
+                        L"Right-click it for startup and exit options.",
+                        kApplicationVersion, kDeveloperName);
+                    MessageBoxW(window_, fallbackText, kApplicationName,
+                                MB_OK | MB_ICONINFORMATION);
+                }
                 break;
             }
 

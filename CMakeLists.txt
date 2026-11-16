@@ -25,6 +25,7 @@ target_compile_definitions(InternetSpeedMeter PRIVATE
 )
 target_link_libraries(InternetSpeedMeter PRIVATE
     advapi32
+    comctl32
     gdi32
     iphlpapi
     shell32
