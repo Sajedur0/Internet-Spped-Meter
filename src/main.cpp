@@ -30,6 +30,7 @@
 #include <winsock2.h>
 #include <ws2ipdef.h>
 #include <windows.h>
+#include <commctrl.h>
 #include <iphlpapi.h>
 #include <shellapi.h>
 #include <strsafe.h>
@@ -47,6 +48,8 @@
 namespace {
 
 constexpr wchar_t kApplicationName[] = L"Internet Speed Meter";
+constexpr wchar_t kApplicationVersion[] = L"1.0.0";
+constexpr wchar_t kDeveloperName[] = L"Sajedur0";
 // Windows' own icon font: E896 is the Download glyph and E898 the Upload one,
 // the same arrows Explorer and Settings use.
 constexpr wchar_t kIconFontFace[] = L"Segoe MDL2 Assets";
@@ -71,6 +74,15 @@ constexpr UINT kMenuToggleOverlay = 1001;
 constexpr UINT kMenuToggleStartup = 1002;
 constexpr UINT kMenuAbout = 1003;
 constexpr UINT kMenuExit = 1004;
+
+HRESULT CALLBACK AboutDialogCallback(HWND, UINT notification, WPARAM, LPARAM link,
+                                     LONG_PTR) {
+    if (notification == TDN_HYPERLINK_CLICKED && link != 0) {
+        ShellExecuteW(nullptr, L"open", reinterpret_cast<LPCWSTR>(link),
+                      nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    return S_OK;
+}
 
 struct InterfaceCounters {
     std::uint64_t receivedBytes = 0;
@@ -705,16 +717,46 @@ private:
                 }
                 break;
 
-            case kMenuAbout:
-                MessageBoxW(
-                    window_,
-                    L"Internet Speed Meter\n\n"
+            case kMenuAbout: {
+                wchar_t aboutText[512]{};
+                StringCchPrintfW(
+                    aboutText, _countof(aboutText),
+                    L"Version: %ls\n"
+                    L"Developer: <a href=\"https://github.com/Sajedur0\">%ls</a>\n\n"
                     L"Native Win32 network speed display.\n"
                     L"The meter sits on the taskbar, left of the tray icons.\n"
                     L"Left-click the tray icon to show or hide the meter.\n"
                     L"Right-click it for startup and exit options.",
-                    kApplicationName, MB_OK | MB_ICONINFORMATION);
+                    kApplicationVersion, kDeveloperName);
+
+                TASKDIALOGCONFIG dialog{};
+                dialog.cbSize = sizeof(dialog);
+                dialog.hwndParent = window_;
+                dialog.dwFlags = TDF_ENABLE_HYPERLINKS |
+                                 TDF_ALLOW_DIALOG_CANCELLATION;
+                dialog.dwCommonButtons = TDCBF_OK_BUTTON;
+                dialog.pszWindowTitle = kApplicationName;
+                dialog.pszMainInstruction = kApplicationName;
+                dialog.pszContent = aboutText;
+                dialog.pszMainIcon = TD_INFORMATION_ICON;
+                dialog.pfCallback = AboutDialogCallback;
+
+                if (FAILED(TaskDialogIndirect(&dialog, nullptr, nullptr, nullptr))) {
+                    // Keep About usable if Task Dialog is unavailable.
+                    wchar_t fallbackText[512]{};
+                    StringCchPrintfW(
+                        fallbackText, _countof(fallbackText),
+                        L"Version: %ls\nDeveloper: %ls\n\n"
+                        L"Native Win32 network speed display.\n"
+                        L"The meter sits on the taskbar, left of the tray icons.\n"
+                        L"Left-click the tray icon to show or hide the meter.\n"
+                        L"Right-click it for startup and exit options.",
+                        kApplicationVersion, kDeveloperName);
+                    MessageBoxW(window_, fallbackText, kApplicationName,
+                                MB_OK | MB_ICONINFORMATION);
+                }
                 break;
+            }
 
             case kMenuExit:
                 DestroyWindow(window_);
@@ -1084,13 +1126,15 @@ private:
     void CreateFonts() {
         DeleteFonts();
 
+        // Start with Windows' stock GUI font so the meter follows the system's
+        // default typeface and weight instead of imposing a custom style.
         LOGFONTW font{};
+        GetObjectW(GetStockObject(DEFAULT_GUI_FONT),
+                   static_cast<int>(sizeof(font)), &font);
         font.lfHeight = -ScaleForDpi(9, dpi_);
-        font.lfWeight = FW_SEMIBOLD;
         // ClearType needs an opaque background, so the transparent meter uses
         // plain grayscale antialiasing and colourises the coverage mask.
         font.lfQuality = ANTIALIASED_QUALITY;
-        StringCchCopyW(font.lfFaceName, _countof(font.lfFaceName), L"Segoe UI");
         textFont_ = CreateFontIndirectW(&font);
 
         LOGFONTW iconFont{};
