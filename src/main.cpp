@@ -47,6 +47,8 @@
 namespace {
 
 constexpr wchar_t kApplicationName[] = L"Internet Speed Meter";
+constexpr wchar_t kApplicationVersion[] = L"1.0.0";
+constexpr wchar_t kDeveloperName[] = L"Sajedur0";
 // Windows' own icon font: E896 is the Download glyph and E898 the Upload one,
 // the same arrows Explorer and Settings use.
 constexpr wchar_t kIconFontFace[] = L"Segoe MDL2 Assets";
@@ -705,16 +707,22 @@ private:
                 }
                 break;
 
-            case kMenuAbout:
-                MessageBoxW(
-                    window_,
+            case kMenuAbout: {
+                wchar_t aboutText[512]{};
+                StringCchPrintfW(
+                    aboutText, _countof(aboutText),
                     L"Internet Speed Meter\n\n"
+                    L"Version: %ls\n"
+                    L"Developer: %ls\n\n"
                     L"Native Win32 network speed display.\n"
                     L"The meter sits on the taskbar, left of the tray icons.\n"
                     L"Left-click the tray icon to show or hide the meter.\n"
                     L"Right-click it for startup and exit options.",
-                    kApplicationName, MB_OK | MB_ICONINFORMATION);
+                    kApplicationVersion, kDeveloperName);
+                MessageBoxW(window_, aboutText, kApplicationName,
+                            MB_OK | MB_ICONINFORMATION);
                 break;
+            }
 
             case kMenuExit:
                 DestroyWindow(window_);
@@ -1084,13 +1092,15 @@ private:
     void CreateFonts() {
         DeleteFonts();
 
+        // Start with Windows' stock GUI font so the meter follows the system's
+        // default typeface and weight instead of imposing a custom style.
         LOGFONTW font{};
+        GetObjectW(GetStockObject(DEFAULT_GUI_FONT),
+                   static_cast<int>(sizeof(font)), &font);
         font.lfHeight = -ScaleForDpi(9, dpi_);
-        font.lfWeight = FW_SEMIBOLD;
         // ClearType needs an opaque background, so the transparent meter uses
         // plain grayscale antialiasing and colourises the coverage mask.
         font.lfQuality = ANTIALIASED_QUALITY;
-        StringCchCopyW(font.lfFaceName, _countof(font.lfFaceName), L"Segoe UI");
         textFont_ = CreateFontIndirectW(&font);
 
         LOGFONTW iconFont{};
